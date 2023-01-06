@@ -4,61 +4,140 @@ package org.bwajtr.tools.views.dashboard;
 import com.vaadin.flow.component.Component;
 import com.vaadin.flow.component.board.Board;
 import com.vaadin.flow.component.charts.Chart;
-import com.vaadin.flow.component.charts.model.*;
-import com.vaadin.flow.component.grid.ColumnTextAlign;
-import com.vaadin.flow.component.grid.Grid;
-import com.vaadin.flow.component.grid.GridVariant;
+import com.vaadin.flow.component.charts.model.ChartType;
+import com.vaadin.flow.component.charts.model.Configuration;
+import com.vaadin.flow.component.charts.model.ListSeries;
+import com.vaadin.flow.component.charts.model.PlotOptionsLine;
+import com.vaadin.flow.component.html.Div;
 import com.vaadin.flow.component.html.H2;
-import com.vaadin.flow.component.html.Main;
 import com.vaadin.flow.component.html.Span;
-import com.vaadin.flow.component.icon.Icon;
-import com.vaadin.flow.component.icon.VaadinIcon;
 import com.vaadin.flow.component.orderedlayout.FlexComponent;
 import com.vaadin.flow.component.orderedlayout.HorizontalLayout;
 import com.vaadin.flow.component.orderedlayout.VerticalLayout;
-import com.vaadin.flow.component.select.Select;
-import com.vaadin.flow.data.renderer.ComponentRenderer;
+import com.vaadin.flow.component.upload.Upload;
+import com.vaadin.flow.component.upload.receivers.MemoryBuffer;
+import com.vaadin.flow.dom.Element;
 import com.vaadin.flow.router.PageTitle;
 import com.vaadin.flow.router.Route;
 import com.vaadin.flow.router.RouteAlias;
-import com.vaadin.flow.theme.lumo.LumoUtility.BoxSizing;
-import com.vaadin.flow.theme.lumo.LumoUtility.FontSize;
-import com.vaadin.flow.theme.lumo.LumoUtility.FontWeight;
-import com.vaadin.flow.theme.lumo.LumoUtility.Margin;
-import com.vaadin.flow.theme.lumo.LumoUtility.Padding;
-import com.vaadin.flow.theme.lumo.LumoUtility.TextColor;
-import org.bwajtr.tools.views.dashboard.ServiceHealth.Status;
+import com.vaadin.flow.theme.lumo.LumoUtility.*;
+import org.apache.commons.fileupload.util.Streams;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
 
 @PageTitle("Dashboard")
 @Route(value = "dashboard")
 @RouteAlias(value = "")
-public class DashboardView extends Main {
+public class DashboardView extends VerticalLayout {
+
+    private int packetsSent;
+    private int packetsReceived;
+    private int packetsLost;
+    private int above200msEvents;
+    private int above500msEvents;
+    private double packetsLostPercentage;
+    private final List<Number> pingTimes = new ArrayList<>();
+    private final Div boardPlaceHolder = new Div();
 
     public DashboardView() {
         addClassName("dashboard-view");
 
+        var headerLayout = new VerticalLayout();
+        headerLayout.add(new H2("Network lag analysis"));
+        headerLayout.add(createFileUploadPanel());
+        add(headerLayout);
+
+        add(boardPlaceHolder);
+        recreateBoard();
+    }
+
+    private void recreateBoard() {
+        boardPlaceHolder.removeAll();
+        boardPlaceHolder.setWidthFull();
         Board board = new Board();
-        board.addRow(createHighlight("Current users", "745", 33.7), createHighlight("View events", "54.6k", -112.45),
-                createHighlight("Conversion rate", "18%", 3.9), createHighlight("Custom metric", "-123.45", 0.0));
-        board.addRow(createViewEvents());
-        board.addRow(createServiceHealth(), createResponseTimes());
-        add(board);
+        board.addRow(createHighlight("Packets sent", String.valueOf(packetsSent), null),
+                createHighlight("Packets lost", String.valueOf(packetsLost), packetsLostPercentage),
+                createHighlight("Events above 200 ms", String.valueOf(above200msEvents), null),
+                createHighlight("Events above 500 ms", String.valueOf(above500msEvents), null));
+        board.addRow(createRoundTripTimesChart());
+        boardPlaceHolder.add(board);
+    }
+
+    private Component createFileUploadPanel() {
+        var layout = new VerticalLayout();
+        layout.setPadding(false);
+
+        var firstLine = new HorizontalLayout();
+        firstLine.add("Capture the ping using the following command and upload the result file:");
+        Element code = new Element("code");
+        code.setText("ping -n 600 google.com > ping_output.log");
+        code.getStyle().set("padding", "0 10px 0 10px");
+        firstLine.getElement().appendChild(code);
+        layout.add(firstLine);
+
+        MemoryBuffer buffer = new MemoryBuffer();
+        Upload upload = new Upload(buffer);
+
+        upload.addSucceededListener(event -> {
+            try {
+                var uploadedFileContent = Streams.asString(buffer.getInputStream());
+                parseFile(uploadedFileContent);
+                recreateBoard();
+                upload.clearFileList();
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        });
+        layout.add(upload);
+
+        return layout;
+    }
+
+    private void parseFile(String uploadedFileContent) {
+        var lines = uploadedFileContent.split("\n");
+
+        packetsSent = 0;
+        packetsLost = 0;
+        packetsReceived = 0;
+        packetsLostPercentage = 0.0;
+        above200msEvents = 0;
+        above500msEvents = 0;
+        pingTimes.clear();
+
+        var replyLineParser = Pattern.compile("time=(\\d+?)ms");
+
+        for (String line : lines) {
+            if (line.startsWith("Reply")) {
+                final Matcher matcher = replyLineParser.matcher(line);
+                if (matcher.find()) {
+                    final int pingTime = Integer.parseInt(matcher.group(1));
+                    pingTimes.add(pingTime);
+                    if (pingTime > 200) above200msEvents++;
+                    if (pingTime > 500) above500msEvents++;
+                }
+            }
+
+            if (line.startsWith("    Packets: ")) {
+                var packetsSummaryParser = Pattern.compile("Packets: Sent = (\\d+?), Received = (\\d+?), Lost = (\\d+?) \\((\\d+?\\.?\\d*?)% loss\\)");
+                final Matcher matcher = packetsSummaryParser.matcher(line);
+                if (matcher.find()) {
+                    packetsSent = Integer.parseInt(matcher.group(1));
+                    packetsReceived = Integer.parseInt(matcher.group(2));
+                    packetsLost = Integer.parseInt(matcher.group(3));
+                    packetsLostPercentage = Double.parseDouble(matcher.group(4));
+                }
+            }
+        }
+
     }
 
     private Component createHighlight(String title, String value, Double percentage) {
-        VaadinIcon icon = VaadinIcon.ARROW_UP;
-        String prefix = "";
         String theme = "badge";
-
-        if (percentage == 0) {
-            prefix = "±";
-        } else if (percentage > 0) {
-            prefix = "+";
-            theme += " success";
-        } else if (percentage < 0) {
-            icon = VaadinIcon.ARROW_DOWN;
-            theme += " error";
-        }
 
         H2 h2 = new H2(title);
         h2.addClassNames(FontWeight.NORMAL, Margin.NONE, TextColor.SECONDARY, FontSize.XSMALL);
@@ -66,49 +145,35 @@ public class DashboardView extends Main {
         Span span = new Span(value);
         span.addClassNames(FontWeight.SEMIBOLD, FontSize.XXXLARGE);
 
-        Icon i = icon.create();
-        i.addClassNames(BoxSizing.BORDER, Padding.XSMALL);
-
-        Span badge = new Span(i, new Span(prefix + percentage.toString()));
-        badge.getElement().getThemeList().add(theme);
-
-        VerticalLayout layout = new VerticalLayout(h2, span, badge);
+        VerticalLayout layout = new VerticalLayout(h2, span);
+        if (percentage != null) {
+            Span badge = new Span(new Span(percentage + " %"));
+            badge.getElement().getThemeList().add(theme);
+            layout.add(badge);
+        }
         layout.addClassName(Padding.LARGE);
         layout.setPadding(false);
         layout.setSpacing(false);
         return layout;
     }
 
-    private Component createViewEvents() {
-        // Header
-        Select year = new Select();
-        year.setItems("2011", "2012", "2013", "2014", "2015", "2016", "2017", "2018", "2019", "2020", "2021");
-        year.setValue("2021");
-        year.setWidth("100px");
-
-        HorizontalLayout header = createHeader("View events", "City/month");
-        header.add(year);
+    private Component createRoundTripTimesChart() {
+        HorizontalLayout header = createHeader("Round trip times", "milliseconds");
 
         // Chart
-        Chart chart = new Chart(ChartType.AREASPLINE);
+        Chart chart = new Chart(ChartType.AREA);
         Configuration conf = chart.getConfiguration();
-        conf.getChart().setStyledMode(true);
+        conf.getTooltip().setFollowPointer(true);
+        conf.getTooltip().setPointFormat("Time: <b>{point.y} ms</b>");
+        conf.getyAxis().setTitle("Time (ms)");
 
-        XAxis xAxis = new XAxis();
-        xAxis.setCategories("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec");
-        conf.addxAxis(xAxis);
-
-        conf.getyAxis().setTitle("Values");
-
-        PlotOptionsAreaspline plotOptions = new PlotOptionsAreaspline();
-        plotOptions.setPointPlacement(PointPlacement.ON);
-        plotOptions.setMarker(new Marker(false));
+        PlotOptionsLine plotOptions = new PlotOptionsLine();
         conf.addPlotOptions(plotOptions);
 
-        conf.addSeries(new ListSeries("Berlin", 189, 191, 291, 396, 501, 403, 609, 712, 729, 942, 1044, 1247));
-        conf.addSeries(new ListSeries("London", 138, 246, 248, 348, 352, 353, 463, 573, 778, 779, 885, 887));
-        conf.addSeries(new ListSeries("New York", 65, 65, 166, 171, 293, 302, 308, 317, 427, 429, 535, 636));
-        conf.addSeries(new ListSeries("Tokyo", 0, 11, 17, 123, 130, 142, 248, 349, 452, 454, 458, 462));
+        final ListSeries pings = new ListSeries("Pings");
+        pings.setData(pingTimes);
+        conf.addSeries(pings);
+
 
         // Add it all together
         VerticalLayout viewEvents = new VerticalLayout(header, chart);
@@ -119,68 +184,7 @@ public class DashboardView extends Main {
         return viewEvents;
     }
 
-    private Component createServiceHealth() {
-        // Header
-        HorizontalLayout header = createHeader("Service health", "Input / output");
-
-        // Grid
-        Grid<ServiceHealth> grid = new Grid();
-        grid.addThemeVariants(GridVariant.LUMO_NO_BORDER);
-        grid.setAllRowsVisible(true);
-
-        grid.addColumn(new ComponentRenderer<>(serviceHealth -> {
-            Span status = new Span();
-            String statusText = getStatusDisplayName(serviceHealth);
-            status.getElement().setAttribute("aria-label", "Status: " + statusText);
-            status.getElement().setAttribute("title", "Status: " + statusText);
-            status.getElement().getThemeList().add(getStatusTheme(serviceHealth));
-            return status;
-        })).setHeader("").setFlexGrow(0).setAutoWidth(true);
-        grid.addColumn(ServiceHealth::getCity).setHeader("City").setFlexGrow(1);
-        grid.addColumn(ServiceHealth::getInput).setHeader("Input").setAutoWidth(true).setTextAlign(ColumnTextAlign.END);
-        grid.addColumn(ServiceHealth::getOutput).setHeader("Output").setAutoWidth(true)
-                .setTextAlign(ColumnTextAlign.END);
-
-        grid.setItems(new ServiceHealth(Status.EXCELLENT, "Münster", 324, 1540),
-                new ServiceHealth(Status.OK, "Cluj-Napoca", 311, 1320),
-                new ServiceHealth(Status.FAILING, "Ciudad Victoria", 300, 1219));
-
-        // Add it all together
-        VerticalLayout serviceHealth = new VerticalLayout(header, grid);
-        serviceHealth.addClassName(Padding.LARGE);
-        serviceHealth.setPadding(false);
-        serviceHealth.setSpacing(false);
-        serviceHealth.getElement().getThemeList().add("spacing-l");
-        return serviceHealth;
-    }
-
-    private Component createResponseTimes() {
-        HorizontalLayout header = createHeader("Response times", "Average across all systems");
-
-        // Chart
-        Chart chart = new Chart(ChartType.PIE);
-        Configuration conf = chart.getConfiguration();
-        conf.getChart().setStyledMode(true);
-        chart.setThemeName("gradient");
-
-        DataSeries series = new DataSeries();
-        series.add(new DataSeriesItem("System 1", 12.5));
-        series.add(new DataSeriesItem("System 2", 12.5));
-        series.add(new DataSeriesItem("System 3", 12.5));
-        series.add(new DataSeriesItem("System 4", 12.5));
-        series.add(new DataSeriesItem("System 5", 12.5));
-        series.add(new DataSeriesItem("System 6", 12.5));
-        conf.addSeries(series);
-
-        // Add it all together
-        VerticalLayout serviceHealth = new VerticalLayout(header, chart);
-        serviceHealth.addClassName(Padding.LARGE);
-        serviceHealth.setPadding(false);
-        serviceHealth.setSpacing(false);
-        serviceHealth.getElement().getThemeList().add("spacing-l");
-        return serviceHealth;
-    }
-
+    @SuppressWarnings("SameParameterValue")
     private HorizontalLayout createHeader(String title, String subtitle) {
         H2 h2 = new H2(title);
         h2.addClassNames(FontSize.XLARGE, Margin.NONE);
@@ -197,30 +201,6 @@ public class DashboardView extends Main {
         header.setSpacing(false);
         header.setWidthFull();
         return header;
-    }
-
-    private String getStatusDisplayName(ServiceHealth serviceHealth) {
-        Status status = serviceHealth.getStatus();
-        if (status == Status.OK) {
-            return "Ok";
-        } else if (status == Status.FAILING) {
-            return "Failing";
-        } else if (status == Status.EXCELLENT) {
-            return "Excellent";
-        } else {
-            return status.toString();
-        }
-    }
-
-    private String getStatusTheme(ServiceHealth serviceHealth) {
-        Status status = serviceHealth.getStatus();
-        String theme = "badge primary small";
-        if (status == Status.EXCELLENT) {
-            theme += " success";
-        } else if (status == Status.FAILING) {
-            theme += " error";
-        }
-        return theme;
     }
 
 }
